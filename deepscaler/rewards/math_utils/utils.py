@@ -7,22 +7,17 @@ import re
 from pylatexenc import latex2text
 import sympy
 from sympy.parsing import sympy_parser
-from typing import Optional
+from typing import Optional, List
 
 
 # Dan Hendrycks' code
-def mathd_normalize_answer(answer: Optional[str]) -> Optional[str]:
-    if answer is None:
-        return None
-    answer = answer.strip()
-    try:
-        # Remove enclosing `\text{}`.
-        m = re.search("^\\\\text\{(?P<text>.+?)\}$", answer)
-        if m is not None:
-            answer = m.group("text").strip()
-        return _strip_string(answer)
-    except:
-        return answer
+def mathd_normalize_answer(answer: str) -> str:
+    """Enhanced normalization for LaTeX variations."""
+    # Example additions (extend based on common issues)
+    answer = re.sub(r"[^0-9.]", "", answer.replace("\\textbf", ""))
+    normalized = answer.replace('\\dfrac', '\\frac').replace(' ', '')
+    normalized = re.sub(r'\^(\d+)', r'^{\1}', normalized)  # Standardize exponents
+    return normalized
 
 def _strip_string(string):
     def _fix_fracs(string):
@@ -365,23 +360,16 @@ def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
     return are_equal
 
 
-def split_tuple(expr: str):
-    """
-    Split the elements in a tuple/interval, while handling well-formatted commas in large numbers
-    """
-    expr = _strip_properly_formatted_commas(expr)
-    if len(expr) == 0:
+def split_tuple(s: str) -> List[str]:
+    """Split tuple string into elements, handling commas with optional whitespace."""
+    if not (s.startswith('(') and s.endswith(')')) and not (s.startswith('[') and s.endswith(']')):
+        return [s]
+    content = s[1:-1].strip()
+    if not content:
         return []
-    if (
-        len(expr) > 2
-        and expr[0] in TUPLE_CHARS
-        and expr[-1] in TUPLE_CHARS
-        and all([ch not in expr[1:-1] for ch in TUPLE_CHARS])
-    ):
-        elems = [elem.strip() for elem in expr[1:-1].split(",")]
-    else:
-        elems = [expr]
-    return elems
+    # Split on commas followed by optional whitespace
+    elements = re.split(r',\s*', content)
+    return [elem.strip() for elem in elements]
 
 
 def last_boxed_only_string(string):
@@ -452,15 +440,22 @@ def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
         is_correct = False
     else:
         for ground_truth_elem, given_elem in zip(ground_truth_elems, given_elems):
-            if _is_frac(ground_truth_elem) and _is_frac(given_elem):
-                # if fractions aren't reduced, then shouldn't be marked as correct
-                # so, we don't want to allow sympy.simplify in this case
-                is_correct = ground_truth_elem == given_elem
-            elif _str_is_int(ground_truth_elem) != _str_is_int(given_elem):
-                # if the ground truth answer is an integer, we require the given answer to be a strict match (no sympy.simplify)
-                is_correct = False
-            else:
-                is_correct = are_equal_under_sympy(ground_truth_elem, given_elem)
+            # Parse elements to SymPy for numeric equivalence
+            try:
+                gt_expr = sympy.parse_expr(ground_truth_elem)
+                given_expr = sympy.parse_expr(given_elem)
+                if sympy.simplify(gt_expr - given_expr) == 0:
+                    continue  # Elements are equal
+                else:
+                    return False
+            except:
+                # Fallback to original checks if parsing fails
+                if _is_frac(ground_truth_elem) and _is_frac(given_elem):
+                    is_correct = ground_truth_elem == given_elem
+                elif _str_is_int(ground_truth_elem) != _str_is_int(given_elem):
+                    is_correct = False
+                else:
+                    is_correct = are_equal_under_sympy(ground_truth_elem, given_elem)
             if not is_correct:
                 break
 
@@ -475,9 +470,27 @@ def grade_answer_mathd(given_answer: str, ground_truth: str) -> bool:
         return True
     return False
 
-def extract_answer(passage: str) -> str:
+
+def extract_answer(passage: str) -> Optional[str]:
+    # Handle \boxed expressions
     if "\\boxed" in passage:
         return extract_boxed_answer(passage)
+
+    # Handle final line answers (common in solutions)
+    lines = passage.strip().split('\n')
+    if lines:
+        last_line = lines[-1].strip()
+        if '=' in last_line:
+            return last_line.split('=')[-1].strip()
+
+    # Handle "Answer:" or "Solution:" prefixes
+    answer_indicators = ['Answer:', 'Answer**:' ,'Solution:', 'Therefore,', 'Thus,', 'Conclusion', 'final answer is:']
+    for indicator in answer_indicators:
+        if indicator in passage:
+            parts = passage.split(indicator)
+            if len(parts) > 1:
+                return parts[-1].strip()
+
     return None
 
 def grade_answer_verl(solution_str, ground_truth):
